@@ -95,17 +95,14 @@ impl Contract for Avro {
         if let (Some(wanted), Some(parsed)) = (&self.full_name, parsed) {
             let actual = parsed.root.name().unwrap_or("an unnamed type");
             if actual != wanted {
-                issues.push(ValidationIssue {
-                    code: "named-type".to_string(),
-                    message: format!("is {actual}, the contract is {wanted}"),
-                    path: Some("avro.schema".to_string()),
-                });
+                issues.push(ValidationIssue::at(
+                    "named-type",
+                    &format!("is {actual}, the contract is {wanted}"),
+                    "avro.schema",
+                ));
             }
         }
-        Ok(ValidationResult {
-            valid: issues.is_empty(),
-            issues,
-        })
+        Ok(ValidationResult::of(issues))
     }
 }
 

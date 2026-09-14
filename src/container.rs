@@ -9,7 +9,7 @@
 
 use contract::ValidationIssue;
 
-use crate::binary::{Reader, encode_bytes, encode_long, encode_string};
+use crate::binary::{Datum, Reader, encode_bytes, encode_long, encode_string};
 use crate::schema::Parsed;
 
 /// `Obj` and the version byte.
@@ -159,12 +159,10 @@ pub fn write(schema_json: &str, datums: &[Vec<u8>]) -> Vec<u8> {
     out
 }
 
+/// A `malformed` issue placed at `path`: a container can always say which
+/// part stopped it being one, so the capability's unplaced one is not used.
 fn malformed(message: &str, path: &str) -> ValidationIssue {
-    ValidationIssue {
-        code: "malformed".to_string(),
-        message: message.to_string(),
-        path: Some(path.to_string()),
-    }
+    ValidationIssue::at("malformed", message, path)
 }
 
 #[cfg(test)]
