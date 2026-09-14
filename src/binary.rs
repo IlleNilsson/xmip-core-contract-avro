@@ -7,91 +7,59 @@
 //! which is what lets a Receive Location hold a megabyte container to its
 //! schema without allocating one.
 //!
-//! The encoders below are the other half, small enough to keep with the
-//! decoder they mirror: a test writes with them and a probe does too.
+//! The cursor and the base-128 varint are the capability's, shared with
+//! protobuf (ADR-0044); what is Avro's is the zig-zag long over the varint
+//! and the walk by schema, added to the cursor as [`Datum`]. The encoders
+//! below are the other half, small enough to keep with the decoder they
+//! mirror: a test writes with them and a probe does too.
 
 use crate::schema::{Parsed, Schema};
+pub use contract::varint::Reader;
 
-/// A cursor over a datum's bytes.
-pub struct Reader<'a> {
-    bytes: &'a [u8],
-    at: usize,
-}
-
-impl<'a> Reader<'a> {
-    #[must_use]
-    pub const fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, at: 0 }
-    }
-
-    /// How far the cursor is.
-    #[must_use]
-    pub const fn position(&self) -> usize {
-        self.at
-    }
-
-    /// Whether every byte was read.
-    #[must_use]
-    pub const fn is_done(&self) -> bool {
-        self.at >= self.bytes.len()
-    }
-
-    fn take(&mut self, count: usize, what: &str) -> Result<&'a [u8], String> {
-        let end = self
-            .at
-            .checked_add(count)
-            .filter(|end| *end <= self.bytes.len())
-            .ok_or_else(|| format!("{what} runs past the end"))?;
-        let slice = &self.bytes[self.at..end];
-        self.at = end;
-        Ok(slice)
-    }
-
+/// What reading an Avro datum adds to the varint cursor.
+pub trait Datum<'a> {
     /// One zig-zag varint, at most ten bytes.
     ///
     /// # Errors
     /// A varint that does not terminate within ten bytes, or the end.
-    pub fn long(&mut self) -> Result<i64, String> {
-        let mut value: u64 = 0;
-        for shift in (0..70).step_by(7) {
-            let byte = self.take(1, "a varint")?[0];
-            value |= u64::from(byte & 0x7f) << shift;
-            if byte & 0x80 == 0 {
-                let decoded = i64::try_from(value >> 1).unwrap_or(i64::MAX);
-                return Ok(if value & 1 == 1 { !decoded } else { decoded });
-            }
-        }
-        Err("a varint over ten bytes".to_string())
-    }
-
-    /// A length, non-negative.
-    fn length(&mut self, what: &str) -> Result<usize, String> {
-        let value = self.long()?;
-        usize::try_from(value).map_err(|_| format!("{what} with a negative length"))
-    }
+    fn long(&mut self) -> Result<i64, String>;
 
     /// Length-prefixed bytes.
     ///
     /// # Errors
     /// A negative length, or one past the end.
-    pub fn bytes(&mut self) -> Result<&'a [u8], String> {
-        let length = self.length("bytes")?;
-        self.take(length, "bytes")
-    }
+    fn bytes(&mut self) -> Result<&'a [u8], String>;
 
     /// A length-prefixed UTF-8 string.
     ///
     /// # Errors
-    /// As [`Reader::bytes`], or bytes that are not UTF-8.
-    pub fn string(&mut self) -> Result<&'a str, String> {
-        std::str::from_utf8(self.bytes()?).map_err(|_| "a string that is not UTF-8".to_string())
-    }
+    /// As [`Datum::bytes`], or bytes that are not UTF-8.
+    fn string(&mut self) -> Result<&'a str, String>;
 
     /// Walk one datum of `schema`, saying where it stopped being one.
     ///
     /// # Errors
     /// The first departure, with the path to it.
-    pub fn skip(&mut self, schema: &Schema, parsed: &Parsed, path: &str) -> Result<(), String> {
+    fn skip(&mut self, schema: &Schema, parsed: &Parsed, path: &str) -> Result<(), String>;
+}
+
+impl<'a> Datum<'a> for Reader<'a> {
+    fn long(&mut self) -> Result<i64, String> {
+        let value = self.varint()?;
+        let decoded = i64::try_from(value >> 1).unwrap_or(i64::MAX);
+        Ok(if value & 1 == 1 { !decoded } else { decoded })
+    }
+
+    fn bytes(&mut self) -> Result<&'a [u8], String> {
+        let length = length(self, "bytes")?;
+        self.take(length, "bytes")
+    }
+
+    fn string(&mut self) -> Result<&'a str, String> {
+        std::str::from_utf8(self.bytes()?).map_err(|_| "a string that is not UTF-8".to_string())
+    }
+
+    fn skip(&mut self, schema: &Schema, parsed: &Parsed, path: &str) -> Result<(), String> {
         let at = |message: String| format!("{message} at {path}");
         match parsed.resolve(schema).map_err(at)? {
             Schema::Null => Ok(()),
@@ -132,10 +100,10 @@ impl<'a> Reader<'a> {
                     .ok_or_else(|| at(format!("a union branch {index} of {}", branches.len())))?;
                 self.skip(branch, parsed, &format!("{path}[{index}]"))
             }
-            Schema::Array(items) => self.blocks(path, |reader, ordinal| {
+            Schema::Array(items) => blocks(self, path, |reader, ordinal| {
                 reader.skip(items, parsed, &format!("{path}[{ordinal}]"))
             }),
-            Schema::Map(values) => self.blocks(path, |reader, ordinal| {
+            Schema::Map(values) => blocks(self, path, |reader, ordinal| {
                 let key = reader
                     .string()
                     .map_err(|m| format!("{m} at {path} key {ordinal}"))?;
@@ -144,31 +112,36 @@ impl<'a> Reader<'a> {
             Schema::Reference(_) => Err(at("a reference to a reference".to_string())),
         }
     }
+}
 
-    /// Block-encoded items: a count, optionally negative with a byte size
-    /// after it, the items, until a zero count.
-    fn blocks(
-        &mut self,
-        path: &str,
-        mut item: impl FnMut(&mut Self, usize) -> Result<(), String>,
-    ) -> Result<(), String> {
-        let mut ordinal = 0usize;
-        loop {
-            let count = self.long().map_err(|m| format!("{m} at {path}"))?;
-            if count == 0 {
-                return Ok(());
-            }
-            let count = if count < 0 {
-                self.length("a block")
-                    .map_err(|m| format!("{m} at {path}"))?;
-                count.unsigned_abs()
-            } else {
-                count.unsigned_abs()
-            };
-            for _ in 0..count {
-                item(self, ordinal)?;
-                ordinal += 1;
-            }
+/// A length, non-negative.
+fn length(reader: &mut Reader<'_>, what: &str) -> Result<usize, String> {
+    let value = reader.long()?;
+    usize::try_from(value).map_err(|_| format!("{what} with a negative length"))
+}
+
+/// Block-encoded items: a count, optionally negative with a byte size after
+/// it, the items, until a zero count.
+fn blocks<'a>(
+    reader: &mut Reader<'a>,
+    path: &str,
+    mut item: impl FnMut(&mut Reader<'a>, usize) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut ordinal = 0usize;
+    loop {
+        let count = reader.long().map_err(|m| format!("{m} at {path}"))?;
+        if count == 0 {
+            return Ok(());
+        }
+        let count = if count < 0 {
+            length(reader, "a block").map_err(|m| format!("{m} at {path}"))?;
+            count.unsigned_abs()
+        } else {
+            count.unsigned_abs()
+        };
+        for _ in 0..count {
+            item(reader, ordinal)?;
+            ordinal += 1;
         }
     }
 }
@@ -176,17 +149,8 @@ impl<'a> Reader<'a> {
 /// `value` as a zig-zag varint.
 #[must_use]
 pub fn encode_long(value: i64) -> Vec<u8> {
-    let mut zigzag = u64::from_le_bytes(((value << 1) ^ (value >> 63)).to_le_bytes());
-    let mut out = Vec::with_capacity(10);
-    loop {
-        let byte = u8::try_from(zigzag & 0x7f).unwrap_or(0);
-        zigzag >>= 7;
-        if zigzag == 0 {
-            out.push(byte);
-            return out;
-        }
-        out.push(byte | 0x80);
-    }
+    let zigzag = u64::from_le_bytes(((value << 1) ^ (value >> 63)).to_le_bytes());
+    contract::varint::encode(zigzag)
 }
 
 /// `bytes` with their length before them.
