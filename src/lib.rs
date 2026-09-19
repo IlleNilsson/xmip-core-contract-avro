@@ -144,7 +144,7 @@ mod tests {
 
     fn probe() -> Vec<u8> {
         let mut datum = encode_long(1);
-        datum.extend(encode_string("ping-pong"));
+        datum.extend(encode_string("round-trip"));
         container::write(PROBE, &[datum])
     }
 
