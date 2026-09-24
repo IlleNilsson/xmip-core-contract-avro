@@ -22,7 +22,7 @@ pub mod binary;
 pub mod container;
 pub mod schema;
 
-use contract::{
+use sdk::contract::{
     Contract, ContractDescriptor, ContractError, ContractFactory, ContractId, ValidationIssue,
     ValidationResult,
 };

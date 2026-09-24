@@ -7,7 +7,7 @@
 //! its schema. Only the `null` codec is decoded here; a deflated or snappy
 //! block is reported as one, not guessed at.
 
-use contract::ValidationIssue;
+use sdk::contract::ValidationIssue;
 
 use crate::binary::{Datum, Reader, encode_bytes, encode_long, encode_string};
 use crate::schema::Parsed;
