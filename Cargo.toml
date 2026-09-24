@@ -20,6 +20,8 @@ path = "src/lib.rs"
 serde_json = "1"
 contract = { package = "xmip-core-contract", git = "https://github.com/IlleNilsson/xmip-core-contract", branch = "main" }
 stream = { package = "xmip-core-stream", git = "https://github.com/IlleNilsson/xmip-core-stream", branch = "main" }
+# The varint encoder, beside the decoder it inverts (open-problems.md, 25).
+message = { package = "xmip-core-message", git = "https://github.com/IlleNilsson/xmip-core-message", branch = "main" }
 
 [dev-dependencies]
 xcore = { package = "xmip-core", git = "https://github.com/IlleNilsson/xmip-core", branch = "main" }
