@@ -150,7 +150,7 @@ fn blocks<'a>(
 #[must_use]
 pub fn encode_long(value: i64) -> Vec<u8> {
     let zigzag = u64::from_le_bytes(((value << 1) ^ (value >> 63)).to_le_bytes());
-    contract::varint::encode(zigzag)
+    message::scan::encode_varint(zigzag)
 }
 
 /// `bytes` with their length before them.
