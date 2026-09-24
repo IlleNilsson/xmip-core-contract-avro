@@ -14,7 +14,6 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
-sdk = { package = "xmip-core-sdk", git = "https://github.com/IlleNilsson/xmip-core-sdk", branch = "main" }
 # A Technology depends on its parent Capability, never the reverse
 # (repository-model.md). The Contract trait and its value types live there.
 # The schema is JSON; the same parser the json-schema contract reads with.
