@@ -7,16 +7,18 @@
 //! which is what lets a Receive Location hold a megabyte container to its
 //! schema without allocating one.
 //!
-//! The cursor and the base-128 varint are the capability's, shared with
-//! protobuf (ADR-0044); what is Avro's is the zig-zag long over the varint
-//! and the walk by schema, added to the cursor as [`Datum`]. The encoders
+//! The cursor, the base-128 varint and the zig-zag over it are codec's, the
+//! estate's one of each; what is Avro's is the walk by schema, added to the
+//! cursor as [`Datum`]. The encoders
 //! below are the other half, small enough to keep with the decoder they
 //! mirror: a test writes with them and a probe does too.
 
-use crate::schema::{Parsed, Schema};
-pub use contract::varint::Reader;
+use codec::cursor::Cursor;
+use codec::varint;
 
-/// What reading an Avro datum adds to the varint cursor.
+use crate::schema::{Parsed, Schema};
+
+/// What reading an Avro datum adds to the byte cursor.
 pub trait Datum<'a> {
     /// One zig-zag varint, at most ten bytes.
     ///
@@ -40,30 +42,30 @@ pub trait Datum<'a> {
     ///
     /// # Errors
     /// The first departure, with the path to it.
-    fn skip(&mut self, schema: &Schema, parsed: &Parsed, path: &str) -> Result<(), String>;
+    fn walk(&mut self, schema: &Schema, parsed: &Parsed, path: &str) -> Result<(), String>;
 }
 
-impl<'a> Datum<'a> for Reader<'a> {
+impl<'a> Datum<'a> for Cursor<'a> {
     fn long(&mut self) -> Result<i64, String> {
-        let value = self.varint()?;
-        let decoded = i64::try_from(value >> 1).unwrap_or(i64::MAX);
-        Ok(if value & 1 == 1 { !decoded } else { decoded })
+        self.varint()
+            .map(varint::unzigzag)
+            .map_err(|error| error.message)
     }
 
     fn bytes(&mut self) -> Result<&'a [u8], String> {
         let length = length(self, "bytes")?;
-        self.take(length, "bytes")
+        taken(self, length, "bytes")
     }
 
     fn string(&mut self) -> Result<&'a str, String> {
         std::str::from_utf8(self.bytes()?).map_err(|_| "a string that is not UTF-8".to_string())
     }
 
-    fn skip(&mut self, schema: &Schema, parsed: &Parsed, path: &str) -> Result<(), String> {
+    fn walk(&mut self, schema: &Schema, parsed: &Parsed, path: &str) -> Result<(), String> {
         let at = |message: String| format!("{message} at {path}");
         match parsed.resolve(schema).map_err(at)? {
             Schema::Null => Ok(()),
-            Schema::Boolean => match self.take(1, "a boolean").map_err(at)?[0] {
+            Schema::Boolean => match taken(self, 1, "a boolean").map_err(at)?[0] {
                 0 | 1 => Ok(()),
                 other => Err(at(format!("a boolean that is {other}"))),
             },
@@ -74,11 +76,11 @@ impl<'a> Datum<'a> for Reader<'a> {
                     .map_err(|_| at(format!("an int that is {value}")))
             }
             Schema::Long => self.long().map(|_| ()).map_err(at),
-            Schema::Float => self.take(4, "a float").map(|_| ()).map_err(at),
-            Schema::Double => self.take(8, "a double").map(|_| ()).map_err(at),
+            Schema::Float => taken(self, 4, "a float").map(|_| ()).map_err(at),
+            Schema::Double => taken(self, 8, "a double").map(|_| ()).map_err(at),
             Schema::Bytes => self.bytes().map(|_| ()).map_err(at),
             Schema::String => self.string().map(|_| ()).map_err(at),
-            Schema::Fixed { size, .. } => self.take(*size, "a fixed").map(|_| ()).map_err(at),
+            Schema::Fixed { size, .. } => taken(self, *size, "a fixed").map(|_| ()).map_err(at),
             Schema::Enum { symbols, .. } => {
                 let index = self.long().map_err(at)?;
                 if index < 0 || usize::try_from(index).unwrap_or(usize::MAX) >= *symbols {
@@ -88,7 +90,7 @@ impl<'a> Datum<'a> for Reader<'a> {
             }
             Schema::Record { fields, .. } => {
                 for (name, field) in fields {
-                    self.skip(field, parsed, &format!("{path}.{name}"))?;
+                    self.walk(field, parsed, &format!("{path}.{name}"))?;
                 }
                 Ok(())
             }
@@ -98,24 +100,31 @@ impl<'a> Datum<'a> for Reader<'a> {
                     .ok()
                     .and_then(|i| branches.get(i))
                     .ok_or_else(|| at(format!("a union branch {index} of {}", branches.len())))?;
-                self.skip(branch, parsed, &format!("{path}[{index}]"))
+                self.walk(branch, parsed, &format!("{path}[{index}]"))
             }
             Schema::Array(items) => blocks(self, path, |reader, ordinal| {
-                reader.skip(items, parsed, &format!("{path}[{ordinal}]"))
+                reader.walk(items, parsed, &format!("{path}[{ordinal}]"))
             }),
             Schema::Map(values) => blocks(self, path, |reader, ordinal| {
                 let key = reader
                     .string()
                     .map_err(|m| format!("{m} at {path} key {ordinal}"))?;
-                reader.skip(values, parsed, &format!("{path}[{key:?}]"))
+                reader.walk(values, parsed, &format!("{path}[{key:?}]"))
             }),
             Schema::Reference(_) => Err(at("a reference to a reference".to_string())),
         }
     }
 }
 
+/// The next `count` bytes, `what` naming them when they are not there.
+fn taken<'a>(reader: &mut Cursor<'a>, count: usize, what: &str) -> Result<&'a [u8], String> {
+    reader
+        .take(count)
+        .map_err(|_| format!("{what} runs past the end"))
+}
+
 /// A length, non-negative.
-fn length(reader: &mut Reader<'_>, what: &str) -> Result<usize, String> {
+fn length(reader: &mut Cursor<'_>, what: &str) -> Result<usize, String> {
     let value = reader.long()?;
     usize::try_from(value).map_err(|_| format!("{what} with a negative length"))
 }
@@ -123,9 +132,9 @@ fn length(reader: &mut Reader<'_>, what: &str) -> Result<usize, String> {
 /// Block-encoded items: a count, optionally negative with a byte size after
 /// it, the items, until a zero count.
 fn blocks<'a>(
-    reader: &mut Reader<'a>,
+    reader: &mut Cursor<'a>,
     path: &str,
-    mut item: impl FnMut(&mut Reader<'a>, usize) -> Result<(), String>,
+    mut item: impl FnMut(&mut Cursor<'a>, usize) -> Result<(), String>,
 ) -> Result<(), String> {
     let mut ordinal = 0usize;
     loop {
@@ -149,8 +158,7 @@ fn blocks<'a>(
 /// `value` as a zig-zag varint.
 #[must_use]
 pub fn encode_long(value: i64) -> Vec<u8> {
-    let zigzag = u64::from_le_bytes(((value << 1) ^ (value >> 63)).to_le_bytes());
-    message::scan::encode_varint(zigzag)
+    varint::encode(varint::zigzag(value))
 }
 
 /// `bytes` with their length before them.
@@ -175,15 +183,15 @@ mod tests {
     fn varints_zigzag_both_ways() {
         for value in [0, -1, 1, -2, 2, 63, -64, 64, 300, i64::MAX, i64::MIN] {
             let bytes = encode_long(value);
-            let mut reader = Reader::new(&bytes);
+            let mut reader = Cursor::new(&bytes);
             assert_eq!(reader.long().expect("long"), value, "{value}");
-            assert!(reader.is_done());
+            assert!(reader.is_empty());
         }
         assert_eq!(encode_long(-1), [1]);
         assert_eq!(encode_long(1), [2]);
         assert_eq!(encode_long(64), [0x80, 0x01]);
-        assert!(Reader::new(&[0x80; 11]).long().is_err(), "eleven bytes");
-        assert!(Reader::new(&[0x80]).long().is_err(), "cut off");
+        assert!(Cursor::new(&[0x80; 11]).long().is_err(), "eleven bytes");
+        assert!(Cursor::new(&[0x80]).long().is_err(), "cut off");
     }
 
     #[test]
@@ -208,28 +216,28 @@ mod tests {
         datum.extend(encode_long(0));
         datum.extend([0u8; 16]); // hash
         datum.extend(encode_long(0)); // parent: null
-        let mut reader = Reader::new(&datum);
-        reader.skip(&parsed.root, &parsed, "order").expect("sound");
-        assert!(reader.is_done());
+        let mut reader = Cursor::new(&datum);
+        reader.walk(&parsed.root, &parsed, "order").expect("sound");
+        assert!(reader.is_empty());
         assert_eq!(reader.position(), datum.len());
 
         let mut bad_enum = datum.clone();
         bad_enum[encode_long(4711).len() + encode_string("ACME").len()] = encode_long(2)[0];
-        let error = Reader::new(&bad_enum)
-            .skip(&parsed.root, &parsed, "order")
+        let error = Cursor::new(&bad_enum)
+            .walk(&parsed.root, &parsed, "order")
             .expect_err("enum");
         assert_eq!(error, "an enum index 2 of 2 symbols at order.status");
 
         let short = &datum[..datum.len() - 1];
-        let error = Reader::new(short)
-            .skip(&parsed.root, &parsed, "order")
+        let error = Cursor::new(short)
+            .walk(&parsed.root, &parsed, "order")
             .expect_err("short");
         assert!(error.ends_with("at order.parent"), "{error}");
 
         let mut bad_string = datum.clone();
         bad_string[encode_long(4711).len() + 1] = 0xff;
-        let error = Reader::new(&bad_string)
-            .skip(&parsed.root, &parsed, "order")
+        let error = Cursor::new(&bad_string)
+            .walk(&parsed.root, &parsed, "order")
             .expect_err("utf-8");
         assert_eq!(error, "a string that is not UTF-8 at order.customer");
     }
@@ -238,28 +246,28 @@ mod tests {
     fn primitives_are_held_to_their_widths() {
         let parsed = Parsed::parse(r#""int""#).expect("int");
         let too_wide = encode_long(i64::from(i32::MAX) + 1);
-        let mut reader = Reader::new(&too_wide);
-        assert!(reader.skip(&parsed.root, &parsed, "n").is_err());
+        let mut reader = Cursor::new(&too_wide);
+        assert!(reader.walk(&parsed.root, &parsed, "n").is_err());
         let parsed = Parsed::parse(r#""boolean""#).expect("boolean");
-        assert!(Reader::new(&[2]).skip(&parsed.root, &parsed, "b").is_err());
-        assert!(Reader::new(&[1]).skip(&parsed.root, &parsed, "b").is_ok());
+        assert!(Cursor::new(&[2]).walk(&parsed.root, &parsed, "b").is_err());
+        assert!(Cursor::new(&[1]).walk(&parsed.root, &parsed, "b").is_ok());
         let parsed = Parsed::parse(r#""double""#).expect("double");
         assert!(
-            Reader::new(&[0; 7])
-                .skip(&parsed.root, &parsed, "d")
+            Cursor::new(&[0; 7])
+                .walk(&parsed.root, &parsed, "d")
                 .is_err()
         );
         let parsed = Parsed::parse(r#"["null","int"]"#).expect("union");
         assert!(
-            Reader::new(&encode_long(2))
-                .skip(&parsed.root, &parsed, "u")
+            Cursor::new(&encode_long(2))
+                .walk(&parsed.root, &parsed, "u")
                 .is_err()
         );
-        assert!(Reader::new(&[0]).skip(&parsed.root, &parsed, "u").is_ok());
+        assert!(Cursor::new(&[0]).walk(&parsed.root, &parsed, "u").is_ok());
         let parsed = Parsed::parse(r#""bytes""#).expect("bytes");
         assert!(
-            Reader::new(&encode_long(-3))
-                .skip(&parsed.root, &parsed, "b")
+            Cursor::new(&encode_long(-3))
+                .walk(&parsed.root, &parsed, "b")
                 .is_err()
         );
     }
