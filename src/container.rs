@@ -9,7 +9,9 @@
 
 use contract::ValidationIssue;
 
-use crate::binary::{Datum, Reader, encode_bytes, encode_long, encode_string};
+use codec::cursor::Cursor;
+
+use crate::binary::{Datum, encode_bytes, encode_long, encode_string};
 use crate::schema::Parsed;
 
 /// `Obj` and the version byte.
@@ -33,7 +35,7 @@ pub fn read_header(bytes: &[u8]) -> Result<Header, String> {
     if !bytes.starts_with(&MAGIC) {
         return Err("the bytes do not open with the Avro magic".to_string());
     }
-    let mut reader = Reader::new(&bytes[MAGIC.len()..]);
+    let mut reader = Cursor::new(&bytes[MAGIC.len()..]);
     let mut schema_json = None;
     let mut codec = "null".to_string();
     loop {
@@ -107,7 +109,7 @@ pub fn validate(bytes: &[u8]) -> (Option<Parsed>, Vec<ValidationIssue>) {
 
 /// One block: its count, its size, its datums walked exactly, its sync.
 fn one_block(bytes: &[u8], sync: &[u8; 16], parsed: &Parsed, path: &str) -> Result<usize, String> {
-    let mut reader = Reader::new(bytes);
+    let mut reader = Cursor::new(bytes);
     let count = reader.long()?;
     let count = usize::try_from(count).map_err(|_| format!("a count of {count}"))?;
     let size = reader.long()?;
@@ -116,11 +118,11 @@ fn one_block(bytes: &[u8], sync: &[u8; 16], parsed: &Parsed, path: &str) -> Resu
     let data = bytes
         .get(start..start + size)
         .ok_or_else(|| "a size that runs past the end".to_string())?;
-    let mut datums = Reader::new(data);
+    let mut datums = Cursor::new(data);
     for ordinal in 1..=count {
-        datums.skip(&parsed.root, parsed, &format!("{path} datum {ordinal}"))?;
+        datums.walk(&parsed.root, parsed, &format!("{path} datum {ordinal}"))?;
     }
-    if !datums.is_done() {
+    if !datums.is_empty() {
         return Err(format!(
             "{} bytes after the last datum",
             data.len() - datums.position()
