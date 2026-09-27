@@ -10,6 +10,7 @@
 use contract::ValidationIssue;
 
 use codec::cursor::Cursor;
+use contract::place::Place;
 
 use crate::binary::{Datum, encode_bytes, encode_long, encode_string};
 use crate::schema::Parsed;
@@ -119,8 +120,11 @@ fn one_block(bytes: &[u8], sync: &[u8; 16], parsed: &Parsed, path: &str) -> Resu
         .get(start..start + size)
         .ok_or_else(|| "a size that runs past the end".to_string())?;
     let mut datums = Cursor::new(data);
+    let root = Place::Root;
+    let label = format!("{path} datum");
+    let datum = root.field(&label);
     for ordinal in 1..=count {
-        datums.walk(&parsed.root, parsed, &format!("{path} datum {ordinal}"))?;
+        datums.walk(&parsed.root, parsed, &datum.index(ordinal))?;
     }
     if !datums.is_empty() {
         return Err(format!(
@@ -212,7 +216,10 @@ mod tests {
         let header_length = read_header(&sound).expect("header").body_at;
         bad_datum[header_length + 2] = 0xff;
         let (_, issues) = validate(&bad_datum);
-        assert!(issues[0].message.contains("block 1 datum 1"), "{issues:?}");
+        assert!(
+            issues[0].message.contains("block 1 datum[1].s"),
+            "{issues:?}"
+        );
         let mut deflated = write(PROBE, &[]);
         let at = deflated
             .windows(4)
