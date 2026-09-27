@@ -19,13 +19,13 @@ path = "src/lib.rs"
 # The schema is JSON; the same parser the json-schema contract reads with.
 serde_json = "1"
 contract = { package = "xmip-core-contract", git = "https://github.com/IlleNilsson/xmip-core-contract", branch = "main" }
+# The settings this technology declares (xcore::settings), read through
+# contract::ContractFactory (ADR-0064, amendment 2026-09-26).
+xcore = { package = "xmip-core", git = "https://github.com/IlleNilsson/xmip-core", branch = "main" }
 stream = { package = "xmip-core-stream", git = "https://github.com/IlleNilsson/xmip-core-stream", branch = "main" }
 # The estate's encoding primitives: the byte cursor a datum is walked with,
 # and the varint and zig-zag an Avro long is written in.
 codec = { package = "xmip-core-library-codec", git = "https://github.com/IlleNilsson/xmip-core-library-codec", branch = "main" }
-
-[dev-dependencies]
-xcore = { package = "xmip-core", git = "https://github.com/IlleNilsson/xmip-core", branch = "main" }
 
 [lints.rust]
 unsafe_code = "forbid"
@@ -37,3 +37,6 @@ missing_errors_doc = "warn"
 missing_panics_doc = "warn"
 unwrap_used = "warn"
 expect_used = "allow"
+
+[profile.dev.package."*"]
+opt-level = 3
