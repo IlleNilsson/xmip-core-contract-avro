@@ -98,7 +98,7 @@ impl Contract for Avro {
             if actual != wanted {
                 issues.push(ValidationIssue::at(
                     "named-type",
-                    &format!("is {actual}, the contract is {wanted}"),
+                    format!("is {actual}, the contract is {wanted}"),
                     "avro.schema",
                 ));
             }

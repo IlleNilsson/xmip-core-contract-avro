@@ -17,6 +17,7 @@ use codec::cursor::Cursor;
 use codec::varint;
 
 use crate::schema::{Parsed, Schema};
+use contract::place::Place;
 
 /// What reading an Avro datum adds to the byte cursor.
 pub trait Datum<'a> {
@@ -38,11 +39,12 @@ pub trait Datum<'a> {
     /// As [`Datum::bytes`], or bytes that are not UTF-8.
     fn string(&mut self) -> Result<&'a str, String>;
 
-    /// Walk one datum of `schema`, saying where it stopped being one.
+    /// Walk one datum of `schema` at `place`, saying where it stopped being
+    /// one. The place is spelled only then.
     ///
     /// # Errors
     /// The first departure, with the path to it.
-    fn walk(&mut self, schema: &Schema, parsed: &Parsed, path: &str) -> Result<(), String>;
+    fn walk(&mut self, schema: &Schema, parsed: &Parsed, place: &Place<'_>) -> Result<(), String>;
 }
 
 impl<'a> Datum<'a> for Cursor<'a> {
@@ -61,8 +63,8 @@ impl<'a> Datum<'a> for Cursor<'a> {
         std::str::from_utf8(self.bytes()?).map_err(|_| "a string that is not UTF-8".to_string())
     }
 
-    fn walk(&mut self, schema: &Schema, parsed: &Parsed, path: &str) -> Result<(), String> {
-        let at = |message: String| format!("{message} at {path}");
+    fn walk(&mut self, schema: &Schema, parsed: &Parsed, place: &Place<'_>) -> Result<(), String> {
+        let at = |message: String| format!("{message} at {}", place.dotted());
         match parsed.resolve(schema).map_err(at)? {
             Schema::Null => Ok(()),
             Schema::Boolean => match taken(self, 1, "a boolean").map_err(at)?[0] {
@@ -90,26 +92,26 @@ impl<'a> Datum<'a> for Cursor<'a> {
             }
             Schema::Record { fields, .. } => {
                 for (name, field) in fields {
-                    self.walk(field, parsed, &format!("{path}.{name}"))?;
+                    self.walk(field, parsed, &place.field(name))?;
                 }
                 Ok(())
             }
             Schema::Union(branches) => {
                 let index = self.long().map_err(at)?;
-                let branch = usize::try_from(index)
+                let (chosen, branch) = usize::try_from(index)
                     .ok()
-                    .and_then(|i| branches.get(i))
+                    .and_then(|i| Some((i, branches.get(i)?)))
                     .ok_or_else(|| at(format!("a union branch {index} of {}", branches.len())))?;
-                self.walk(branch, parsed, &format!("{path}[{index}]"))
+                self.walk(branch, parsed, &place.index(chosen))
             }
-            Schema::Array(items) => blocks(self, path, |reader, ordinal| {
-                reader.walk(items, parsed, &format!("{path}[{ordinal}]"))
+            Schema::Array(items) => blocks(self, place, |reader, ordinal| {
+                reader.walk(items, parsed, &place.index(ordinal))
             }),
-            Schema::Map(values) => blocks(self, path, |reader, ordinal| {
+            Schema::Map(values) => blocks(self, place, |reader, ordinal| {
                 let key = reader
                     .string()
-                    .map_err(|m| format!("{m} at {path} key {ordinal}"))?;
-                reader.walk(values, parsed, &format!("{path}[{key:?}]"))
+                    .map_err(|m| format!("{m} at {} key {ordinal}", place.dotted()))?;
+                reader.walk(values, parsed, &place.entry(key))
             }),
             Schema::Reference(_) => Err(at("a reference to a reference".to_string())),
         }
@@ -133,17 +135,18 @@ fn length(reader: &mut Cursor<'_>, what: &str) -> Result<usize, String> {
 /// it, the items, until a zero count.
 fn blocks<'a>(
     reader: &mut Cursor<'a>,
-    path: &str,
+    place: &Place<'_>,
     mut item: impl FnMut(&mut Cursor<'a>, usize) -> Result<(), String>,
 ) -> Result<(), String> {
     let mut ordinal = 0usize;
     loop {
-        let count = reader.long().map_err(|m| format!("{m} at {path}"))?;
+        let at = |m: String| format!("{m} at {}", place.dotted());
+        let count = reader.long().map_err(at)?;
         if count == 0 {
             return Ok(());
         }
         let count = if count < 0 {
-            length(reader, "a block").map_err(|m| format!("{m} at {path}"))?;
+            length(reader, "a block").map_err(at)?;
             count.unsigned_abs()
         } else {
             count.unsigned_abs()
@@ -197,8 +200,10 @@ mod tests {
     #[test]
     fn a_datum_is_walked_by_its_schema_and_departures_are_placed() {
         let parsed = Parsed::parse(crate::schema::tests::ORDER).expect("schema");
+        let root = Place::Root;
+        let order = root.field("order");
         let mut datum = encode_long(4711);
-        datum.extend(encode_string("ACME"));
+        datum.extend(encode_string("partner-x"));
         datum.extend(encode_long(1)); // PAID
         datum.extend(encode_long(2)); // two lines
         for (sku, qty) in [("X001", 2), ("X002", 1)] {
@@ -217,27 +222,27 @@ mod tests {
         datum.extend([0u8; 16]); // hash
         datum.extend(encode_long(0)); // parent: null
         let mut reader = Cursor::new(&datum);
-        reader.walk(&parsed.root, &parsed, "order").expect("sound");
+        reader.walk(&parsed.root, &parsed, &order).expect("sound");
         assert!(reader.is_empty());
         assert_eq!(reader.position(), datum.len());
 
         let mut bad_enum = datum.clone();
-        bad_enum[encode_long(4711).len() + encode_string("ACME").len()] = encode_long(2)[0];
+        bad_enum[encode_long(4711).len() + encode_string("partner-x").len()] = encode_long(2)[0];
         let error = Cursor::new(&bad_enum)
-            .walk(&parsed.root, &parsed, "order")
+            .walk(&parsed.root, &parsed, &order)
             .expect_err("enum");
         assert_eq!(error, "an enum index 2 of 2 symbols at order.status");
 
         let short = &datum[..datum.len() - 1];
         let error = Cursor::new(short)
-            .walk(&parsed.root, &parsed, "order")
+            .walk(&parsed.root, &parsed, &order)
             .expect_err("short");
         assert!(error.ends_with("at order.parent"), "{error}");
 
         let mut bad_string = datum.clone();
         bad_string[encode_long(4711).len() + 1] = 0xff;
         let error = Cursor::new(&bad_string)
-            .walk(&parsed.root, &parsed, "order")
+            .walk(&parsed.root, &parsed, &order)
             .expect_err("utf-8");
         assert_eq!(error, "a string that is not UTF-8 at order.customer");
     }
@@ -247,27 +252,39 @@ mod tests {
         let parsed = Parsed::parse(r#""int""#).expect("int");
         let too_wide = encode_long(i64::from(i32::MAX) + 1);
         let mut reader = Cursor::new(&too_wide);
-        assert!(reader.walk(&parsed.root, &parsed, "n").is_err());
+        assert!(reader.walk(&parsed.root, &parsed, &Place::Root).is_err());
         let parsed = Parsed::parse(r#""boolean""#).expect("boolean");
-        assert!(Cursor::new(&[2]).walk(&parsed.root, &parsed, "b").is_err());
-        assert!(Cursor::new(&[1]).walk(&parsed.root, &parsed, "b").is_ok());
+        assert!(
+            Cursor::new(&[2])
+                .walk(&parsed.root, &parsed, &Place::Root)
+                .is_err()
+        );
+        assert!(
+            Cursor::new(&[1])
+                .walk(&parsed.root, &parsed, &Place::Root)
+                .is_ok()
+        );
         let parsed = Parsed::parse(r#""double""#).expect("double");
         assert!(
             Cursor::new(&[0; 7])
-                .walk(&parsed.root, &parsed, "d")
+                .walk(&parsed.root, &parsed, &Place::Root)
                 .is_err()
         );
         let parsed = Parsed::parse(r#"["null","int"]"#).expect("union");
         assert!(
             Cursor::new(&encode_long(2))
-                .walk(&parsed.root, &parsed, "u")
+                .walk(&parsed.root, &parsed, &Place::Root)
                 .is_err()
         );
-        assert!(Cursor::new(&[0]).walk(&parsed.root, &parsed, "u").is_ok());
+        assert!(
+            Cursor::new(&[0])
+                .walk(&parsed.root, &parsed, &Place::Root)
+                .is_ok()
+        );
         let parsed = Parsed::parse(r#""bytes""#).expect("bytes");
         assert!(
             Cursor::new(&encode_long(-3))
-                .walk(&parsed.root, &parsed, "b")
+                .walk(&parsed.root, &parsed, &Place::Root)
                 .is_err()
         );
     }
