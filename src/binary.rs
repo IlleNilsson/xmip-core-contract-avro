@@ -203,7 +203,7 @@ mod tests {
         let root = Place::Root;
         let order = root.field("order");
         let mut datum = encode_long(4711);
-        datum.extend(encode_string("partner-x"));
+        datum.extend(encode_string("party-x"));
         datum.extend(encode_long(1)); // PAID
         datum.extend(encode_long(2)); // two lines
         for (sku, qty) in [("X001", 2), ("X002", 1)] {
@@ -227,7 +227,7 @@ mod tests {
         assert_eq!(reader.position(), datum.len());
 
         let mut bad_enum = datum.clone();
-        bad_enum[encode_long(4711).len() + encode_string("partner-x").len()] = encode_long(2)[0];
+        bad_enum[encode_long(4711).len() + encode_string("party-x").len()] = encode_long(2)[0];
         let error = Cursor::new(&bad_enum)
             .walk(&parsed.root, &parsed, &order)
             .expect_err("enum");
