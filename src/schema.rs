@@ -244,6 +244,7 @@ fn primitive_or_reference(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use std::assert_matches;
 
     pub const ORDER: &str = r#"{
         "type": "record", "name": "Order", "namespace": "com.example",
@@ -276,8 +277,10 @@ pub(crate) mod tests {
         };
         assert_eq!(fields.len(), 8);
         assert_eq!(fields[0].1, Schema::Long);
-        assert!(matches!(&fields[3].1, Schema::Array(items)
-            if matches!(**items, Schema::Record { .. })));
+        assert_matches!(
+            &fields[3].1,
+            Schema::Array(items) if matches!(**items, Schema::Record { .. })
+        );
         assert_eq!(
             fields[7].1,
             Schema::Union(vec![
