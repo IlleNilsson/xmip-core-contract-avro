@@ -14,7 +14,7 @@
 //! mirror: a test writes with them and a probe does too.
 
 use codec::cursor::Cursor;
-use codec::varint;
+use codec::{depth, varint};
 
 use crate::schema::{Parsed, Schema};
 use contract::place::Place;
@@ -64,57 +64,95 @@ impl<'a> Datum<'a> for Cursor<'a> {
     }
 
     fn walk(&mut self, schema: &Schema, parsed: &Parsed, place: &Place<'_>) -> Result<(), String> {
-        let at = |message: String| format!("{message} at {}", place.dotted());
-        match parsed.resolve(schema).map_err(at)? {
-            Schema::Null => Ok(()),
-            Schema::Boolean => match taken(self, 1, "a boolean").map_err(at)?[0] {
-                0 | 1 => Ok(()),
-                other => Err(at(format!("a boolean that is {other}"))),
-            },
-            Schema::Int => {
-                let value = self.long().map_err(at)?;
-                i32::try_from(value)
-                    .map(|_| ())
-                    .map_err(|_| at(format!("an int that is {value}")))
-            }
-            Schema::Long => self.long().map(|_| ()).map_err(at),
-            Schema::Float => taken(self, 4, "a float").map(|_| ()).map_err(at),
-            Schema::Double => taken(self, 8, "a double").map(|_| ()).map_err(at),
-            Schema::Bytes => self.bytes().map(|_| ()).map_err(at),
-            Schema::String => self.string().map(|_| ()).map_err(at),
-            Schema::Fixed { size, .. } => taken(self, *size, "a fixed").map(|_| ()).map_err(at),
-            Schema::Enum { symbols, .. } => {
-                let index = self.long().map_err(at)?;
-                if index < 0 || usize::try_from(index).unwrap_or(usize::MAX) >= *symbols {
-                    return Err(at(format!("an enum index {index} of {symbols} symbols")));
-                }
-                Ok(())
-            }
-            Schema::Record { fields, .. } => {
-                for (name, field) in fields {
-                    self.walk(field, parsed, &place.field(name))?;
-                }
-                Ok(())
-            }
-            Schema::Union(branches) => {
-                let index = self.long().map_err(at)?;
-                let (chosen, branch) = usize::try_from(index)
-                    .ok()
-                    .and_then(|i| Some((i, branches.get(i)?)))
-                    .ok_or_else(|| at(format!("a union branch {index} of {}", branches.len())))?;
-                self.walk(branch, parsed, &place.index(chosen))
-            }
-            Schema::Array(items) => blocks(self, place, |reader, ordinal| {
-                reader.walk(items, parsed, &place.index(ordinal))
-            }),
-            Schema::Map(values) => blocks(self, place, |reader, ordinal| {
-                let key = reader
-                    .string()
-                    .map_err(|m| format!("{m} at {} key {ordinal}", place.dotted()))?;
-                reader.walk(values, parsed, &place.entry(key))
-            }),
-            Schema::Reference(_) => Err(at("a reference to a reference".to_string())),
+        walk_at(self, schema, parsed, place, 0)
+    }
+}
+
+/// [`Datum::walk`] at `depth` levels down: a record's field, a union's
+/// branch and an array's or map's item each go one deeper, and past
+/// [`codec::depth::MAX_DEPTH`] the datum is refused, so a recursive schema
+/// cannot be walked down the stack by the bytes.
+fn walk_at(
+    reader: &mut Cursor<'_>,
+    schema: &Schema,
+    parsed: &Parsed,
+    place: &Place<'_>,
+    depth: usize,
+) -> Result<(), String> {
+    let at = |message: String| format!("{message} at {}", place.dotted());
+    depth::within(depth, "an Avro datum").map_err(|e| at(e.message))?;
+    let deeper = depth + 1;
+    match parsed.resolve(schema).map_err(at)? {
+        Schema::Null => Ok(()),
+        Schema::Boolean => match taken(reader, 1, "a boolean").map_err(at)?[0] {
+            0 | 1 => Ok(()),
+            other => Err(at(format!("a boolean that is {other}"))),
+        },
+        Schema::Int => {
+            let value = reader.long().map_err(at)?;
+            i32::try_from(value)
+                .map(|_| ())
+                .map_err(|_| at(format!("an int that is {value}")))
         }
+        Schema::Long => reader.long().map(|_| ()).map_err(at),
+        Schema::Float => taken(reader, 4, "a float").map(|_| ()).map_err(at),
+        Schema::Double => taken(reader, 8, "a double").map(|_| ()).map_err(at),
+        Schema::Bytes => reader.bytes().map(|_| ()).map_err(at),
+        Schema::String => reader.string().map(|_| ()).map_err(at),
+        Schema::Fixed { size, .. } => taken(reader, *size, "a fixed").map(|_| ()).map_err(at),
+        Schema::Enum { symbols, .. } => {
+            let index = reader.long().map_err(at)?;
+            if index < 0 || usize::try_from(index).unwrap_or(usize::MAX) >= *symbols {
+                return Err(at(format!("an enum index {index} of {symbols} symbols")));
+            }
+            Ok(())
+        }
+        Schema::Record { fields, .. } => {
+            for (name, field) in fields {
+                walk_at(reader, field, parsed, &place.field(name), deeper)?;
+            }
+            Ok(())
+        }
+        Schema::Union(branches) => {
+            let index = reader.long().map_err(at)?;
+            let (chosen, branch) = usize::try_from(index)
+                .ok()
+                .and_then(|i| Some((i, branches.get(i)?)))
+                .ok_or_else(|| at(format!("a union branch {index} of {}", branches.len())))?;
+            walk_at(reader, branch, parsed, &place.index(chosen), deeper)
+        }
+        Schema::Array(items) => {
+            let empty = zero_width(items, parsed, deeper);
+            blocks(reader, place, empty, |reader, ordinal| {
+                walk_at(reader, items, parsed, &place.index(ordinal), deeper)
+            })
+        }
+        Schema::Map(values) => blocks(reader, place, false, |reader, ordinal| {
+            let key = reader
+                .string()
+                .map_err(|m| format!("{m} at {} key {ordinal}", place.dotted()))?;
+            walk_at(reader, values, parsed, &place.entry(key), deeper)
+        }),
+        Schema::Reference(_) => Err(at("a reference to a reference".to_string())),
+    }
+}
+
+/// Whether every datum of `schema` takes no bytes at all: `null`, a
+/// `fixed` of size 0, and a record of nothing else. A schema takes no
+/// bytes always or at least one always, since every other type writes a
+/// byte; a reference that nests past the depth cap is said not to, and
+/// the walk refuses it there.
+fn zero_width(schema: &Schema, parsed: &Parsed, depth: usize) -> bool {
+    if depth::within(depth, "an Avro schema").is_err() {
+        return false;
+    }
+    match parsed.resolve(schema) {
+        Ok(Schema::Null) => true,
+        Ok(Schema::Fixed { size, .. }) => *size == 0,
+        Ok(Schema::Record { fields, .. }) => fields
+            .iter()
+            .all(|(_, field)| zero_width(field, parsed, depth + 1)),
+        _ => false,
     }
 }
 
@@ -133,9 +171,15 @@ fn length(reader: &mut Cursor<'_>, what: &str) -> Result<usize, String> {
 
 /// Block-encoded items: a count, optionally negative with a byte size after
 /// it, the items, until a zero count.
+///
+/// Items that take a byte each end the loop with the bytes. Items that take
+/// none (`empty`) are not walked, since there is nothing to walk; their
+/// count is refused where it is above the bytes that remain, so a count of
+/// `i64::MAX` is one refusal and never a loop.
 fn blocks<'a>(
     reader: &mut Cursor<'a>,
     place: &Place<'_>,
+    empty: bool,
     mut item: impl FnMut(&mut Cursor<'a>, usize) -> Result<(), String>,
 ) -> Result<(), String> {
     let mut ordinal = 0usize;
@@ -151,6 +195,16 @@ fn blocks<'a>(
         } else {
             count.unsigned_abs()
         };
+        if empty {
+            let remaining = reader.remaining().len();
+            if count > u64::try_from(remaining).unwrap_or(u64::MAX) {
+                return Err(at(format!(
+                    "a block of {count} items that take no bytes, where {remaining} bytes remain"
+                )));
+            }
+            ordinal = ordinal.saturating_add(usize::try_from(count).unwrap_or(usize::MAX));
+            continue;
+        }
         for _ in 0..count {
             item(reader, ordinal)?;
             ordinal += 1;
@@ -245,6 +299,55 @@ mod tests {
             .walk(&parsed.root, &parsed, &order)
             .expect_err("utf-8");
         assert_eq!(error, "a string that is not UTF-8 at order.customer");
+    }
+
+    #[test]
+    fn a_datum_nested_past_the_cap_is_refused_before_the_stack_is() {
+        let list = r#"{"type":"record","name":"Node","fields":
+            [{"name":"next","type":["null","Node"]}]}"#;
+        let parsed = Parsed::parse(list).expect("schema");
+        let mut hostile = vec![2u8; 100_000];
+        hostile.push(0);
+        let error = Cursor::new(&hostile)
+            .walk(&parsed.root, &parsed, &Place::Root)
+            .expect_err("too deep");
+        assert!(
+            error.contains("an Avro datum nests past the 64 levels"),
+            "{error}"
+        );
+        let mut honest = vec![2u8; 10];
+        honest.push(0);
+        let mut reader = Cursor::new(&honest);
+        reader
+            .walk(&parsed.root, &parsed, &Place::Root)
+            .expect("ten deep");
+        assert!(reader.is_empty());
+    }
+
+    #[test]
+    fn a_count_of_items_that_take_no_bytes_is_held_to_the_bytes_left() {
+        for items in [r#""null""#, r#"{"type":"record","name":"E","fields":[]}"#] {
+            let schema = format!(r#"{{"type":"array","items":{items}}}"#);
+            let parsed = Parsed::parse(&schema).expect("schema");
+            for count in [i64::MAX, -i64::MAX, 1 << 40] {
+                let mut hostile = encode_long(count);
+                if count < 0 {
+                    hostile.extend(encode_long(0));
+                }
+                hostile.extend(encode_long(0));
+                let error = Cursor::new(&hostile)
+                    .walk(&parsed.root, &parsed, &Place::Root)
+                    .expect_err("refused");
+                assert!(error.contains("take no bytes"), "{error}");
+            }
+            let mut fits = encode_long(2);
+            fits.extend([0, 0]);
+            let mut reader = Cursor::new(&fits);
+            reader
+                .walk(&parsed.root, &parsed, &Place::Root)
+                .expect("two");
+            assert_eq!(reader.remaining(), [0], "the end count is read once");
+        }
     }
 
     #[test]
