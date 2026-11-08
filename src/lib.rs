@@ -88,11 +88,11 @@ impl Contract for Avro {
         }) {
             return Ok(true);
         }
-        Ok(stream.bytes().starts_with(&container::MAGIC))
+        Ok(stream.load()?.starts_with(&container::MAGIC))
     }
 
     fn validate(&self, stream: &Stream) -> Result<ValidationResult, ContractError> {
-        let (parsed, mut issues) = container::validate(stream.bytes());
+        let (parsed, mut issues) = container::validate(stream.load()?);
         if let (Some(wanted), Some(parsed)) = (&self.full_name, parsed) {
             let actual = parsed.root.name().unwrap_or("an unnamed type");
             if actual != wanted {
