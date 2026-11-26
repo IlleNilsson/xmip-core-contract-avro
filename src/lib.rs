@@ -17,24 +17,41 @@
 //! record of that full name. A schema kept elsewhere — a registry, a file —
 //! and the single-object encoding that refers to one by fingerprint are the
 //! next layer here.
+//!
+//! **Built with its `declaration` feature alone** the crate is
+//! [`declaration`], what a Location naming it is configured with and the
+//! name a Validate step names it by, and none of the code above, which is
+//! behind the default feature: what the surfaces' library carries (ADR-0064,
+//! amendment 2026-11-26).
 
+#[cfg(feature = "declaration")]
+pub mod declaration;
+
+#[cfg(feature = "default")]
 pub mod binary;
+#[cfg(feature = "default")]
 pub mod container;
+#[cfg(feature = "default")]
 pub mod schema;
 
+#[cfg(feature = "default")]
 use contract::{
     Contract, ContractDescriptor, ContractError, ContractFactory, ContractId, ValidationIssue,
     ValidationResult,
 };
+#[cfg(feature = "default")]
 use stream::Stream;
-use xcore::settings::{Applies, Kind, Presence, Setting, Settings};
+#[cfg(feature = "default")]
+use xcore::settings::Settings;
 
 /// The Avro contract, bare or bound to a named type.
+#[cfg(feature = "default")]
 pub struct Avro {
     descriptor: ContractDescriptor,
     full_name: Option<String>,
 }
 
+#[cfg(feature = "default")]
 impl Avro {
     /// A sound container, of any schema.
     #[must_use]
@@ -61,12 +78,14 @@ impl Avro {
     }
 }
 
+#[cfg(feature = "default")]
 impl Default for Avro {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(feature = "default")]
 fn descriptor(id: &str) -> ContractDescriptor {
     ContractDescriptor {
         id: ContractId(id.to_string()),
@@ -75,6 +94,7 @@ fn descriptor(id: &str) -> ContractDescriptor {
     }
 }
 
+#[cfg(feature = "default")]
 impl Contract for Avro {
     fn descriptor(&self) -> &ContractDescriptor {
         &self.descriptor
@@ -110,15 +130,17 @@ impl Contract for Avro {
 /// Loads the contract a Location names: an empty reference is the bare
 /// contract, anything else the full name of the record every container
 /// must carry, `com.example.Order`.
+#[cfg(feature = "default")]
 pub struct AvroFactory;
 
+#[cfg(feature = "default")]
 impl ContractFactory for AvroFactory {
     fn technology(&self) -> &'static str {
-        "avro"
+        declaration::NAME
     }
 
     fn settings(&self) -> &'static Settings {
-        SETTINGS
+        declaration::SETTINGS
     }
 
     fn load(&self, reference: &str) -> Result<Box<dyn Contract>, ContractError> {
@@ -137,18 +159,6 @@ impl ContractFactory for AvroFactory {
         Ok(Box::new(Avro::of(reference)))
     }
 }
-
-/// What a Location gives this contract (ADR-0064, amendment 2026-09-26).
-const SETTINGS: &Settings = &Settings {
-    technology: env!("CARGO_PKG_NAME"),
-    settings: &[Setting {
-        name: "reference",
-        kind: Kind::Text,
-        presence: Presence::Optional,
-        meaning: "The full name of the record every container carries, com.example.Order.",
-        applies: Applies::Both,
-    }],
-};
 
 #[cfg(test)]
 mod tests {
@@ -239,6 +249,8 @@ mod tests {
 
     #[test]
     fn avro_declares_its_settings_and_reads_through_them() {
+        use declaration::SETTINGS;
+        use xcore::settings::Applies;
         assert!(SETTINGS.problems().is_empty(), "{:?}", SETTINGS.problems());
         let given = |name: &str, value: &str| {
             (

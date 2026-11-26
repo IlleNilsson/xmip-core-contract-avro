@@ -14,15 +14,26 @@ path = "src/lib.rs"
 # A Technology depends on its parent Capability, never the reverse
 # (repository-model.md). The Contract trait and its value types live there.
 # The schema is JSON; the same parser the json-schema contract reads with.
-serde_json = "1"
-contract = { package = "xmip-core-contract", git = "https://github.com/IlleNilsson/xmip-core-contract", branch = "main" }
+serde_json = { version = "1", optional = true }
+contract = { package = "xmip-core-contract", git = "https://github.com/IlleNilsson/xmip-core-contract", branch = "main", optional = true }
 # The settings this technology declares (xcore::settings), read through
 # contract::ContractFactory (ADR-0064, amendment 2026-09-26).
 xcore = { package = "xmip-core", git = "https://github.com/IlleNilsson/xmip-core", branch = "main" }
-stream = { package = "xmip-core-stream", git = "https://github.com/IlleNilsson/xmip-core-stream", branch = "main" }
+stream = { package = "xmip-core-stream", git = "https://github.com/IlleNilsson/xmip-core-stream", branch = "main", optional = true }
 # The estate's encoding primitives: the byte cursor a datum is walked with,
 # and the varint and zig-zag an Avro long is written in.
-codec = { package = "xmip-core-library-codec", git = "https://github.com/IlleNilsson/xmip-core-library-codec", branch = "main" }
+codec = { package = "xmip-core-library-codec", git = "https://github.com/IlleNilsson/xmip-core-library-codec", branch = "main", optional = true }
+
+[features]
+# The technology: its code, everything it is built on, and its declaration.
+# Without it the crate is its declaration alone (ADR-0064, amendments
+# 2026-10-22 and 2026-11-26).
+default = ["declaration", "dep:serde_json", "dep:contract", "dep:stream", "dep:codec"]
+# The declaration alone: what a Location naming this contract is configured
+# with, `declaration::SETTINGS`, and the name a Validate step's `format`
+# names it by, `NAME`, and none of the code — what the surfaces' library is
+# to carry (open problem 48).
+declaration = []
 
 [lints.rust]
 unsafe_code = "forbid"
