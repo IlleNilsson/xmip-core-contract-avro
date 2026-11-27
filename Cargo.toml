@@ -1,11 +1,11 @@
 [package]
 name = "xmip-core-contract-avro"
-version = "0.1.0"
-edition = "2024"
-license = "AGPL-3.0-or-later"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 repository = "https://github.com/IlleNilsson/xmip-core-contract-avro"
 description = "Apache Avro content contract: a sound object container file always, every datum decoded against the schema it carries; of a bound named type when a Location names one. A xmip-core-contract technology."
-publish = false
+publish.workspace = true
 
 [lib]
 path = "src/lib.rs"
@@ -31,13 +31,5 @@ default = ["declaration", "dep:serde_json", "dep:contract", "dep:stream", "dep:c
 # The declaration alone.
 declaration = []
 
-[lints.rust]
-unsafe_code = "forbid"
-
-[lints.clippy]
-too_many_lines = "warn"
-pedantic = { level = "warn", priority = -1 }
-missing_errors_doc = "warn"
-missing_panics_doc = "warn"
-unwrap_used = "warn"
-expect_used = "allow"
+[lints]
+workspace = true
