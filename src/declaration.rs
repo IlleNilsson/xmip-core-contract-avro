@@ -1,9 +1,5 @@
-//! What a Location naming this contract is configured with, and the name a
-//! Validate step's `format` names it by: its declaration, which its
-//! `ContractFactory` reads, built with the crate's `declaration` feature
-//! alone and the code behind the default (ADR-0064, amendments 2026-10-22
-//! and 2026-11-26), for the library the surfaces load to carry (open
-//! problem 48).
+//! This contract's declaration: the contract guide,
+//! `module/core/capability/contract/doc/adding-a-contract.md`.
 
 use xcore::settings::{Applies, Kind, Presence, Setting, Settings};
 
